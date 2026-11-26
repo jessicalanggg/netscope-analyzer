@@ -1,129 +1,145 @@
-# NetScope v1.0
+# NetScope
 
-**Offline network packet analyzer built in C++20 and Qt 6.** An educational systems/networking project demonstrating PCAP parsing, flow aggregation, indexed packet access, bounded raw-byte caching, and desktop UI engineering.
+**A fast packet analyzer in C++20, with a Qt 6 desktop GUI and a CLI.** It reads pcap and
+pcapng files or captures live traffic. It decodes Ethernet/VLAN, IPv4 and IPv6, and TCP, UDP and
+ICMP, then builds flows and conversations and reassembles every TCP stream. Its results are checked
+against Wireshark in CI.
+
+## NetScope vs Wireshark (tshark 4.6.10)
+
+The comparison is one pass over the same file for both tools. NetScope runs `analyze`, which includes full
+TCP reassembly. tshark runs `-n -q -z conv,tcp -z conv,udp -z io,phs`. Timings are the median of 3 warm
+runs on an Apple Silicon Mac (10 cores), using synthetic mixed traffic.
+
+| Capture | Frames | Size | NetScope | tshark | Speedup | Peak RSS (NetScope / tshark) |
+|---|---:|---:|---:|---:|---:|---:|
+| mixed_1m.pcap | 1,000,000 | 569 MB | 2.92 s | 30.08 s | **10.3×** | 65 MB / 578 MB |
+| mixed_1m.pcapng | 1,000,000 | 587 MB | 2.14 s | 26.32 s | **12.3×** | 68 MB / 612 MB |
+| mixed_100k.pcap | 100,000 | 57 MB | 0.28 s | 3.41 s | **12.1×** | 8 MB / 215 MB |
+| mixed_100k.pcapng | 100,000 | 59 MB | 0.25 s | 3.95 s | **15.7×** | 9 MB / 215 MB |
+
+**Correctness against tshark**: on every capture above, both tools report the same frame count, the
+same TCP stream count (35,603 on the 1M capture) and the same TCP+UDP conversation count. For 60
+sampled streams per capture, the reassembled payload is **byte-identical** in both directions. More
+than half of the sampled streams contain reordered or retransmitted segments. The
+`wireshark-parity` CI job repeats this check on every push.
+
+> These numbers compare a purpose-built L2–L4 analyzer with Wireshark's full dissection engine, which
+> decodes thousands of protocols. NetScope is faster because it does less work per packet, not because
+> it replaces Wireshark. Reproduce the comparison with `scripts/bench_vs_tshark.py` (see below).
+
 
 ## Features
 
-- Ethernet II / IPv4 / TCP / UDP / ICMP decoding from classic PCAP captures
-- Packet explorer with protocol details, hex inspection and packet filtering
-- Directional 5-tuple flows and bidirectional conversations
-- TCP flag observations and inferred connection state (incomplete captures may be midstream)
-- Protocol dashboard, time-series summaries, sortable tables and CSV exports
-- Indexed PCAP access, on-demand raw-byte retrieval, LRU cache, background loading
-- Light/dark appearance preferences, CTest regression suites and CLI benchmarks
-- Portable Windows packaging target with recursive MinGW/UCRT DLL dependency collection
+- **Formats**: classic pcap (µs/ns, either byte order) and **pcapng**. pcapng files may have several
+  sections and interfaces, EPB/SPB blocks, and per-interface timestamp resolution.
+- **Link types**: Ethernet with **802.1Q/802.1ad VLAN** (QinQ), raw IP, BSD loopback, Linux cooked capture.
+- **Protocols**: IPv4 (fragments), **IPv6** (extension headers, fragments, RFC 5952 addresses),
+  TCP, UDP, ICMP, ICMPv6.
+- **TCP stream reassembly**: handles sequence-number wraparound, out-of-order segments, retransmissions
+  and overlaps. Buffering is capped per stream, and abandoned gaps are counted. Stream numbering
+  matches Wireshark's `tcp.stream`.
+- **Live capture**: libpcap feeds a capture thread, which passes packets through a **lock-free SPSC
+  ring buffer** to the analysis thread. Per-second rates are printed, and ring drops and kernel drops
+  are counted separately. BPF filters, packet-count and duration limits, and `-w` to save the capture.
+- **Analytics**: directional 5-tuple flows, bidirectional conversations, observed TCP state, a traffic
+  timeline, and CSV export (GUI).
+- **Large files**: a packet-offset index loads raw bytes on demand, with a capped LRU cache, and
+  loading runs in the background (GUI).
 
-## Build — Windows 11, MSYS2 UCRT64, Qt 6
+## Usage
 
-From the `netscope-starter` directory in PowerShell 5.1:
-
-```powershell
-$env:Path = "C:\msys64\ucrt64\bin;$env:Path"
-cmake -S . -B build -G Ninja `
-  -DCMAKE_BUILD_TYPE=Release `
-  -DCMAKE_PREFIX_PATH=C:/msys64/ucrt64 `
-  -DNETSCOPE_BUILD_GUI=ON `
-  -DNETSCOPE_PACKAGE_WINDOWS=ON
-cmake --build build
-ctest --test-dir build --output-on-failure
-.\build\netscope-gui.exe
-cmake --build build --target package-windows
+```text
+netscope analyze  <capture>                  protocols, talkers, flows, conversations, TCP stream stats
+netscope streams  <capture>                  every reassembled TCP stream (TSV)
+netscope follow   <capture> <id[,id]> [--raw] stream contents; --raw output matches tshark follow,tcp,raw
+netscope benchmark <capture> [runs]          time the full pipeline
+netscope interfaces                          list capture interfaces
+netscope capture  <iface> [-c N] [-d SEC] [-f BPF] [-w out.pcap] [-p] [-q] [--ring MiB]
 ```
 
-The packaging target **deletes and recreates** `build/NetScope-portable` before deployment, then runs `windeployqt`, recursively collects MSYS2 UCRT64 DLL imports, generates a SHA-256 manifest, and creates `build/NetScope-v1.0-Windows-Portable.zip`. The target requires PowerShell, `objdump.exe`, and `windeployqt.exe` from the matching UCRT64 toolchain. If any non-system import cannot be resolved, packaging fails instead of silently shipping an incomplete distribution.
-
-**Clean-machine test:** extract the portable ZIP on a compatible Windows PC with no Qt/MSYS2 installed; launch `netscope-gui.exe` and open `showcase.pcap`. A successful build on the development PC is not sufficient proof of portability. See `docs/RELEASE_CHECKLIST.md`.
-
-## Build — macOS (Apple Silicon or Intel)
-
-Install Apple's Command Line Tools, Homebrew, CMake, Ninja, and Qt 6. This builds the **native macOS** GUI and CLI; the Windows portable ZIP does not run on macOS.
-
-```bash
-xcode-select --install                 # skip if already installed
-brew install cmake ninja qt
-
-git clone https://github.com/YOUR-USERNAME/NetScope.git
-cd NetScope
-cmake -S . -B build -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH="$(brew --prefix qt)" \
-  -DNETSCOPE_BUILD_GUI=ON
-cmake --build build
-ctest --test-dir build --output-on-failure
-./build/netscope analyze showcase.pcap
-open ./build/netscope-gui.app
+```text
+$ netscope capture lo0 -f "port 47123 or port 47124" -d 4 -w live.pcap
+Capturing on lo0 (linktype 0, ring 64 MiB) filter: port 47123 or port 47124 — Ctrl-C to stop
+[   2.0s] 86 pkts  86 pps  1.64 Mbps  ring 0.0%  drops ring=0 kernel=0
+...
+Decoded IP: 86 (IPv4 36, IPv6 50, VLAN-tagged 0)
+TCP streams: 1
+  Reassembled payload bytes: 200010
+Capture: captured=86 analyzed=86 ring_drops=0 kernel_drops=0 interface_drops=0
 ```
 
-Replace `YOUR-USERNAME` with the repository owner's actual GitHub username. The Qt GUI target is created as a macOS `.app` bundle by CMake's `WIN32` executable option; `open` launches it. Homebrew automatically uses the native architecture and prefix (`/opt/homebrew` for typical Apple Silicon installations, `/usr/local` for typical Intel installations). The build requires a Qt 6 version supported by the installed macOS and compiler.
-
-**Mac support status:** source/build instructions and CI are included, but a native MacBook GUI launch and packaged `.dmg` have **not** been independently verified. `NETSCOPE_PACKAGE_WINDOWS` is Windows-only. If Qt is not found, CMake currently builds the CLI only; confirm `netscope-gui.app` exists before claiming GUI success.
-
-## Build — Linux CLI
-
-```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNETSCOPE_BUILD_GUI=OFF
-cmake --build build
-ctest --test-dir build --output-on-failure
-./build/netscope analyze showcase.pcap
-./build/netscope benchmark showcase.pcap
-```
-
-## Benchmarking
-
-```powershell
-python scripts/make_benchmark_pcap.py --packets 100000 --output benchmark_100k.pcap
-.\build\netscope.exe benchmark benchmark_100k.pcap
-.\build\netscope.exe benchmark-index benchmark_100k.pcap 5
-```
-
-Measured on one Windows development machine for a synthetic 100,000-frame (~9 MB) capture: CLI analysis ~2.01 million frames/sec, indexing median ~458,000 frames/sec over five runs. These are **different workloads** and not representative of arbitrary real-world PCAPs. Benchmark hardware/configuration and multiple runs should accompany public performance claims.
+Live capture needs permission. On macOS, install Wireshark's ChmodBPF (it adds you to `access_bpf`).
+On Linux, run as root or give the binary `cap_net_raw,cap_net_admin`.
 
 ## Architecture
 
 ```text
-Classic PCAP file
-      | 
-      +--> Sequential PCAP reader --> Protocol decoder --> Flow/conversation analytics
-      |
-      +--> Packet offset index --> On-demand raw bytes --> Bounded LRU packet cache
-                                                      |
-Qt Widgets GUI <--> Packet table model / filters / dashboard / details / hex view
-CLI          <--> Analysis and index benchmark commands
+ pcap / pcapng file ──> CaptureReader ──┬──> Analyzer ──> decode_frame (Eth/VLAN/SLL/loopback/raw → IPv4/IPv6 → TCP/UDP/ICMP)
+                                        │                 ├─> FlowTracker, ConversationTracker, timeline
+ live interface ──> libpcap ──> capture │                 └─> TcpReassembler ──> follow / streams / stats
+                    thread ──> PacketRing (lock-free SPSC) ┘
+                                        └──> IndexedPcap ──> LRU raw-byte cache ──> Qt GUI (table, details, hex, dashboard)
 ```
 
-## Limitations and safety
+Design notes: [docs/V11_PROTOCOLS_REASSEMBLY_LIVE.md](docs/V11_PROTOCOLS_REASSEMBLY_LIVE.md) and the earlier `docs/V0*` files.
 
-Classic PCAP only (not pcapng); Ethernet II/IPv4 only; no IPv6, VLAN, TCP stream reassembly, checksum validation, live capture, or intrusion detection. TCP states are **observations**, not a complete protocol state machine. The raw-byte cache is bounded, but packet metadata, index and flow statistics grow with capture size. The parser is not fully fuzz-hardened; do not assume malicious PCAPs are safe. Analyze only authorized captures.
+## Build
 
-## GitHub release and demonstration
-
-The repository keeps exactly **one README file**, this root `README.md`. Technical design notes are under `docs/`. Build outputs and portable archives are not committed to Git. Publish Windows ZIPs as GitHub **Release assets** after clean-machine testing; macOS users should build from source until native macOS distribution is validated.
-
-To publish from a local clone or extracted source folder:
+**macOS** (Apple Silicon or Intel). libpcap comes with the SDK:
 
 ```bash
-git init
-git add .
-git commit -m "Release NetScope v1.0"
-git branch -M main
-git remote add origin https://github.com/YOUR-USERNAME/NetScope.git
-git push -u origin main
+brew install cmake ninja qt
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix qt)"
+cmake --build build && ctest --test-dir build --output-on-failure
+open build/netscope-gui.app
 ```
 
-Create the empty GitHub repository first and replace the placeholder URL. If this is an existing Git repository, do **not** run `git init` or overwrite its history; review `git status`, commit, and push on the existing branch instead.
+**Linux** (CLI):
 
-## Portfolio demonstration
+```bash
+sudo apt-get install -y cmake libpcap-dev
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNETSCOPE_BUILD_GUI=OFF
+cmake --build build && ctest --test-dir build --output-on-failure
+```
 
-1. Load `showcase.pcap` and demonstrate protocol decoding and hexadecimal details.
-2. Apply packet filters; explore directional flows and bidirectional conversations.
-3. Explain indexed access, LRU cache trade-offs, and memory complexity.
-4. Show benchmark and CTest outputs; explain measurement limitations.
-5. Demonstrate the portable ZIP on a clean Windows machine.
+**Windows**: build with MSYS2 UCRT64 and Qt 6. Live capture needs the Npcap SDK on `CMAKE_PREFIX_PATH`;
+without it the build is offline-only.
 
-## Project layout
+```powershell
+$env:Path = "C:\msys64\ucrt64\bin;$env:Path"
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=C:/msys64/ucrt64 -DNETSCOPE_PACKAGE_WINDOWS=ON
+cmake --build build; ctest --test-dir build --output-on-failure
+cmake --build build --target package-windows   # portable ZIP with Qt and its dependent DLLs
+```
 
-`src/` analysis engine and CLI; `include/netscope/` public headers; `gui/` Qt desktop app; `tests/` regression suites; `scripts/` deterministic PCAP generators; `packaging/` Windows deployment; `docs/` architecture and release checklist; `.github/workflows/` CI.
+## Reproducing the Wireshark comparison
+
+```bash
+python3 scripts/make_mixed_pcap.py --packets 1000000 --output mixed_1m.pcap
+editcap -F pcapng mixed_1m.pcap mixed_1m.pcapng
+python3 scripts/bench_vs_tshark.py --netscope build/netscope mixed_1m.pcap mixed_1m.pcapng
+```
+
+The generator writes deterministic synthetic traffic: interleaved TCP sessions with handshakes,
+teardowns, and some reordered and retransmitted segments, plus DNS-like UDP and ICMP. About 25% is
+IPv6 and about 15% is VLAN-tagged. No real hosts or payloads are included.
+
+## Testing
+
+There are 11 CTest suites. They run in Release builds with assertions enabled, on Linux, Windows,
+macOS arm64 and macOS x86-64. A separate CI job checks the results against tshark, and Linux CI runs
+a live loopback capture.
+
+## Limitations
+
+- tshark dissects thousands of protocols; NetScope decodes L2–L4 only. It has no application-layer
+  dissectors, IP defragmentation, checksum validation or IDS.
+- TCP state is *observed* from flags; NetScope does not run a full protocol state machine.
+- Benchmarks use synthetic traffic on a single machine. Real capture mixes behave differently.
+- The parser rejects malformed input with bounds checks and is tested on every truncated prefix, but
+  it has not been fuzzed. Treat captures from untrusted sources with care.
 
 ## License
 
-See `LICENSE`. Third-party Qt and MSYS2 libraries retain their own licenses; check redistribution requirements when publishing binaries.
+MIT, see `LICENSE`. Qt and MSYS2 libraries keep their own licenses.

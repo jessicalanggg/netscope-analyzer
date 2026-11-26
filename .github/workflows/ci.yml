@@ -9,7 +9,10 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - name: Install libpcap (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libpcap-dev
       - name: Install Qt (macOS)
         if: runner.os == 'macOS'
         run: brew install qt ninja cmake
@@ -28,7 +31,37 @@ jobs:
         run: test -d build/netscope-gui.app
       - name: CLI smoke test (macOS/Linux)
         if: runner.os != 'Windows'
-        run: ./build/netscope analyze showcase.pcap
+        run: |
+          ./build/netscope analyze showcase.pcap
+          ./build/netscope streams showcase.pcap | head
       - name: CLI smoke test (Windows)
         if: runner.os == 'Windows'
         run: .\build\Release\netscope.exe analyze showcase.pcap
+      - name: Live capture smoke test (Linux, loopback)
+        if: runner.os == 'Linux'
+        run: |
+          (sleep 1; ping -c 5 -i 0.2 127.0.0.1 >/dev/null; ping -6 -c 5 -i 0.2 ::1 >/dev/null || true) &
+          sudo ./build/netscope capture lo -f icmp -c 5 -d 10 -q -w live.pcap
+          ./build/netscope analyze live.pcap
+
+  # Cross-checks NetScope against Wireshark's tshark on a synthetic capture with
+  # IPv4/IPv6, VLAN tags, reordered and retransmitted TCP segments, in pcap and pcapng.
+  wireshark-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install tshark and libpcap
+        run: |
+          echo "wireshark-common wireshark-common/install-setuid boolean false" | sudo debconf-set-selections
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark libpcap-dev
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNETSCOPE_BUILD_GUI=OFF -DBUILD_TESTING=OFF
+          cmake --build build
+      - name: Generate captures
+        run: |
+          python3 scripts/make_mixed_pcap.py --packets 50000 --output mixed.pcap
+          editcap -F pcapng mixed.pcap mixed.pcapng
+      - name: Compare with tshark
+        run: python3 scripts/bench_vs_tshark.py --netscope build/netscope --runs 1 --sample 60 mixed.pcap mixed.pcapng | tee -a "$GITHUB_STEP_SUMMARY"

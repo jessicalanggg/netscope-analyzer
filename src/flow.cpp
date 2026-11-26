@@ -14,8 +14,8 @@ size_t FlowKeyHash::operator()(const FlowKey& key) const noexcept {
  return seed;
 }
 void FlowTracker::observe(const Packet& packet) {
- // Non-initial IPv4 fragments have no transport header to identify a 5-tuple.
- if(packet.protocol=="IPv4-fragment") return;
+ // Non-initial IPv4/IPv6 fragments have no transport header to identify a 5-tuple.
+ if(packet.protocol=="IPv4-fragment" || packet.protocol=="IPv6-fragment") return;
  FlowKey key{packet.source_ip,packet.destination_ip,packet.protocol,
              packet.source_port,packet.destination_port};
  auto& stats=flows_[key];

@@ -65,10 +65,10 @@ void setupTable(QTableWidget* table,const QStringList& headers) {
 }
 }
 MainWindow::MainWindow(QWidget* parent):QMainWindow(parent) {
- setWindowTitle("NetScope v1.0 — Network Traffic Analyzer");
+ setWindowTitle("NetScope v1.1 — Network Traffic Analyzer");
  resize(1200,800);
  auto* fileMenu=menuBar()->addMenu("&File");
- auto* open=fileMenu->addAction("&Open PCAP...");
+ auto* open=fileMenu->addAction("&Open Capture...");
  openAction_=open;
  open->setShortcut(QKeySequence::Open);
  connect(open,&QAction::triggered,this,[this]{openCapture();});
@@ -86,7 +86,7 @@ MainWindow::MainWindow(QWidget* parent):QMainWindow(parent) {
  auto* helpMenu=menuBar()->addMenu("&Help");
  auto* aboutAction=helpMenu->addAction("&About NetScope...");
  connect(aboutAction,&QAction::triggered,this,[this]{
-  QMessageBox::about(this,"About NetScope", "NetScope v1.0\nOffline Network Traffic Analyzer\n\nC++20 + Qt 6\nIndexed PCAP access, bounded raw-byte cache, flow and conversation analytics.\n\nOpen-source portfolio project. Offline captures only.");
+  QMessageBox::about(this,"About NetScope", "NetScope v1.1\nOffline Network Traffic Analyzer\n\nC++20 + Qt 6\npcap & pcapng, IPv4/IPv6/VLAN, indexed access, bounded raw-byte cache, flow and conversation analytics.\n\nOpen-source portfolio project. Offline captures only.");
  });
  auto* toolbar=addToolBar("Capture");
  toolbar->setMovable(false);
@@ -197,7 +197,7 @@ MainWindow::MainWindow(QWidget* parent):QMainWindow(parent) {
  restorePreferences();
 }
 void MainWindow::openCapture() {
- const auto path=QFileDialog::getOpenFileName(this,"Open Ethernet PCAP",{},"PCAP captures (*.pcap *.cap);;All files (*)");
+ const auto path=QFileDialog::getOpenFileName(this,"Open capture",{},"Packet captures (*.pcap *.pcapng *.cap);;All files (*)");
  if(!path.isEmpty()) loadCapture(path);
 }
 MainWindow::~MainWindow() {
@@ -241,7 +241,7 @@ void MainWindow::loadCapture(const QString& filename) {
     CapturedPacket item;
     item.captured_length=static_cast<uint32_t>(record.bytes.size());
     item.timestamp_us=record.timestamp_us;
-    if(auto decoded=netscope::decode_ethernet(record.bytes)) {
+    if(auto decoded=netscope::decode_frame(record.linktype,record.bytes)) {
      item.decoded=true;
      item.packet=*decoded;
      result->tracker.observe(*decoded);
@@ -272,7 +272,7 @@ void MainWindow::loadCapture(const QString& filename) {
    conversations_=std::move(result->conversations);
    timeline_=std::move(result->timeline);
    currentFile_=filename;
-   setWindowTitle("NetScope v1.0 — "+QFileInfo(filename).fileName());
+   setWindowTitle("NetScope v1.1 — "+QFileInfo(filename).fileName());
    filter_->clear();
    packetModel_->setPackets(&packets_);
    refreshFilter();
@@ -325,11 +325,17 @@ void MainWindow::showPacketDetails() {
  frame->addChild(new QTreeWidgetItem({"Captured length: " + QString::number(capture.captured_length) + " bytes"}));
  if(capture.decoded) {
   const auto& p=capture.packet;
-  auto* ipv4=new QTreeWidgetItem(details_,{"IPv4"});
-  ipv4->addChild(new QTreeWidgetItem({"Source: " + qstr(p.source_ip)}));
-  ipv4->addChild(new QTreeWidgetItem({"Destination: " + qstr(p.destination_ip)}));
-  ipv4->addChild(new QTreeWidgetItem({"TTL: " + QString::number(p.ipv4_ttl)}));
-  ipv4->addChild(new QTreeWidgetItem({"Header length: " + QString::number(p.ipv4_header_length) + " bytes"}));
+  if(p.vlan_depth) {
+   auto* vlan=new QTreeWidgetItem(details_,{"802.1Q VLAN"});
+   vlan->addChild(new QTreeWidgetItem({"VLAN ID: " + QString::number(p.vlan_id)}));
+   vlan->addChild(new QTreeWidgetItem({"Tag depth: " + QString::number(p.vlan_depth)}));
+  }
+  const bool v6=p.ip_version==6;
+  auto* ip=new QTreeWidgetItem(details_,{v6?"IPv6":"IPv4"});
+  ip->addChild(new QTreeWidgetItem({"Source: " + qstr(p.source_ip)}));
+  ip->addChild(new QTreeWidgetItem({"Destination: " + qstr(p.destination_ip)}));
+  ip->addChild(new QTreeWidgetItem({QString(v6?"Hop limit: ":"TTL: ") + QString::number(p.ipv4_ttl)}));
+  ip->addChild(new QTreeWidgetItem({QString(v6?"Header length (incl. extensions): ":"Header length: ") + QString::number(p.ipv4_header_length) + " bytes"}));
   auto* transport=new QTreeWidgetItem(details_,{qstr(p.protocol)});
   if(p.protocol=="TCP"||p.protocol=="UDP") {
    transport->addChild(new QTreeWidgetItem({"Source port: " + QString::number(p.source_port)}));
@@ -342,12 +348,12 @@ void MainWindow::showPacketDetails() {
    transport->addChild(new QTreeWidgetItem({"TCP header length: " + QString::number(p.tcp_header_length) + " bytes"}));
    transport->addChild(new QTreeWidgetItem({"Window size: " + QString::number(p.tcp_window)}));
   }
-  if(p.protocol=="ICMP") {
+  if(p.protocol=="ICMP"||p.protocol=="ICMPv6") {
    transport->addChild(new QTreeWidgetItem({"Type: " + QString::number(p.icmp_type)}));
    transport->addChild(new QTreeWidgetItem({"Code: " + QString::number(p.icmp_code)}));
   }
  } else {
-  new QTreeWidgetItem(details_,{"Unsupported or malformed Ethernet/IPv4 packet"});
+  new QTreeWidgetItem(details_,{"Unsupported or malformed packet"});
  }
  details_->expandAll();
  try {
@@ -414,7 +420,7 @@ void MainWindow::refreshSummary() {
   ++protocols[capture.packet.protocol];
   ++talkers[capture.packet.source_ip];
  }
- summary_->setText(QString("%1     |     %2 frames     |     %3 decoded IPv4     |     %4 directional flows | %5 conversations")
+ summary_->setText(QString("%1     |     %2 frames     |     %3 decoded IP     |     %4 directional flows | %5 conversations")
   .arg(QFileInfo(currentFile_).fileName())
   .arg(static_cast<qulonglong>(packets_.size()))
   .arg(static_cast<qulonglong>(decoded))

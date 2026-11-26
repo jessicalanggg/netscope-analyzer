@@ -8,7 +8,7 @@
 #include <unordered_map>
 #include <vector>
 namespace netscope {
-struct PacketIndexEntry { uint64_t data_offset=0, timestamp_us=0; uint32_t captured_length=0, original_length=0; };
+struct PacketIndexEntry { uint64_t data_offset=0, timestamp_us=0; uint32_t captured_length=0, original_length=0, linktype=1; };
 class IndexedPcap {
 public:
  explicit IndexedPcap(const std::string& path);
