@@ -63,5 +63,14 @@ jobs:
         run: |
           python3 scripts/make_mixed_pcap.py --packets 50000 --output mixed.pcap
           editcap -F pcapng mixed.pcap mixed.pcapng
+      - name: Allow tshark to read workspace files
+        # Ubuntu's AppArmor profile for tshark denies reads outside a few paths.
+        run: |
+          ls /etc/apparmor.d | grep -i -E 'tshark|wireshark' || true
+          for prof in /etc/apparmor.d/*tshark* /etc/apparmor.d/*wireshark*; do
+            [ -e "$prof" ] && sudo apparmor_parser -R "$prof" || true
+          done
+          tshark -n -r mixed.pcap -c 1
       - name: Compare with tshark
+        shell: bash   # implies -o pipefail, so a failure is not masked by tee
         run: python3 scripts/bench_vs_tshark.py --netscope build/netscope --runs 1 --sample 60 mixed.pcap mixed.pcapng | tee -a "$GITHUB_STEP_SUMMARY"
