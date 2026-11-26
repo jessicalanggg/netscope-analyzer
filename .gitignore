@@ -1,0 +1,14 @@
+build/
+build-*/
+.vscode/
+.idea/
+.DS_Store
+*.obj
+*.o
+*.exe
+*.a
+*.dylib
+*.dll
+*.app/
+*.zip
+benchmark_*.pcap

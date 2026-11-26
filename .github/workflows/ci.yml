@@ -1,0 +1,34 @@
+name: C++ CI
+on: [push, pull_request]
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt (macOS)
+        if: runner.os == 'macOS'
+        run: brew install qt ninja cmake
+      - name: Configure (macOS Qt GUI)
+        if: runner.os == 'macOS'
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix qt)" -DNETSCOPE_BUILD_GUI=ON
+      - name: Configure (Linux/Windows CLI)
+        if: runner.os != 'macOS'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNETSCOPE_BUILD_GUI=OFF
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Verify macOS GUI bundle exists
+        if: runner.os == 'macOS'
+        run: test -d build/netscope-gui.app
+      - name: CLI smoke test (macOS/Linux)
+        if: runner.os != 'Windows'
+        run: ./build/netscope analyze showcase.pcap
+      - name: CLI smoke test (Windows)
+        if: runner.os == 'Windows'
+        run: .\build\Release\netscope.exe analyze showcase.pcap
